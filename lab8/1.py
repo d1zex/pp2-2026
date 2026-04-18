@@ -88,7 +88,7 @@ BEGIN
     SELECT * FROM phonebook
     ORDER BY id
     LIMIT lim OFFSET off;
-END;
+END;    
 $$;
 """)
 
