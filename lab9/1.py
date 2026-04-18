@@ -8,25 +8,33 @@ WIDTH, HEIGHT = 400, 400
 CENTER = (WIDTH // 2, HEIGHT // 2)
 FPS = 60
 
-clock_image = pygame.image.load('mickeyclock.jpeg')
-clock_image = pygame.transform.scale(clock_image, (WIDTH, HEIGHT))
-
 screen = pygame.display.set_mode((WIDTH, HEIGHT))
 pygame.display.set_caption("Mickey Clock")
 
-def draw_clock(minute_angle, second_angle):
-    screen.blit(clock_image, (0, 0))  
-    minute_hand_length = 60  
-    minute_x = CENTER[0] + minute_hand_length * math.cos(math.radians(minute_angle))
-    minute_y = CENTER[1] + minute_hand_length * math.sin(math.radians(minute_angle))
-    second_hand_length = 90  
-    second_x = CENTER[0] + second_hand_length * math.cos(math.radians(second_angle))
-    second_y = CENTER[1] + second_hand_length * math.sin(math.radians(second_angle))
+clock_image = pygame.image.load('mickeyclock.jpeg')
+clock_image = pygame.transform.scale(clock_image, (WIDTH, HEIGHT))
 
-    pygame.draw.line(screen, (128, 255, 0), CENTER, (minute_x, minute_y), 6)  # Right hand (minutes)
-    pygame.draw.line(screen, (255, 0, 0), CENTER, (second_x, second_y), 3)  # Left hand (seconds)
+def draw_hand(angle_deg, length, color, thickness):
+    angle_rad = math.radians(angle_deg - 90)
 
-    pygame.display.flip() 
+    x = CENTER[0] + length * math.cos(angle_rad)
+    y = CENTER[1] + length * math.sin(angle_rad)
+
+    pygame.draw.line(screen, color, CENTER, (x, y), thickness)
+
+def draw_clock(hour_angle, minute_angle, second_angle):
+    screen.blit(clock_image, (0, 0))
+
+    # hourses
+    draw_hand(hour_angle, 40, (0, 255, 255), 8)
+
+    # minutes
+    draw_hand(minute_angle, 60, (128, 255, 0), 6)
+
+    # seconds
+    draw_hand(second_angle, 90, (255, 0, 0), 3)
+
+    pygame.display.flip()
 
 def main():
     clock = pygame.time.Clock()
@@ -37,14 +45,17 @@ def main():
             if event.type == pygame.QUIT:
                 running = False
 
-        current_time = time.localtime()
-        minutes = current_time.tm_min
-        seconds = current_time.tm_sec
+        t = time.localtime()
 
-        minute_angle = (minutes + seconds / 60) * 6  
-        second_angle = seconds * 6  
+        hours = t.tm_hour % 12
+        minutes = t.tm_min
+        seconds = t.tm_sec
 
-        draw_clock(minute_angle, second_angle)
+        hour_angle = (hours * 30) + (minutes * 0.5)
+        minute_angle = (minutes * 6) + (seconds * 0.1)
+        second_angle = seconds * 6
+
+        draw_clock(hour_angle, minute_angle, second_angle)
 
         clock.tick(FPS)
 
