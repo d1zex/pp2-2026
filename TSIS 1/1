@@ -1,0 +1,321 @@
+import psycopg2
+import pandas as pd
+import re
+import json
+
+# connection
+conn = psycopg2.connect(
+    dbname="phonebook_db",
+    user="postgres",
+    password="lolpopqwerty",
+    host="localhost",
+    port="5432"
+)
+cur = conn.cursor()
+
+# tables
+cur.execute("""
+CREATE TABLE IF NOT EXISTS phonebook (
+    id SERIAL PRIMARY KEY,
+    first_name VARCHAR(50) UNIQUE,
+    phone VARCHAR(15),
+    email VARCHAR(100),
+    birthday DATE,
+    group_id INTEGER
+)
+""")
+
+cur.execute("""
+CREATE TABLE IF NOT EXISTS groups (
+    id SERIAL PRIMARY KEY,
+    name VARCHAR(50) UNIQUE NOT NULL
+)
+""")
+
+cur.execute("""
+CREATE TABLE IF NOT EXISTS phones (
+    id SERIAL PRIMARY KEY,
+    contact_id INTEGER REFERENCES phonebook(id) ON DELETE CASCADE,
+    phone VARCHAR(20),
+    type VARCHAR(10) CHECK (type IN ('home','work','mobile'))
+)
+""")
+
+# old functions
+cur.execute("""
+CREATE OR REPLACE FUNCTION get_contacts_by_pattern(p TEXT)
+RETURNS TABLE(first_name VARCHAR, phone VARCHAR)
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    RETURN QUERY
+    SELECT c.first_name, c.phone
+    FROM phonebook c
+    WHERE c.first_name ILIKE '%' || p || '%'
+       OR c.phone ILIKE '%' || p || '%';
+END;
+$$;
+""")
+
+cur.execute("""
+CREATE OR REPLACE PROCEDURE upsert_contact(p_name VARCHAR, p_phone VARCHAR)
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM phonebook WHERE first_name = p_name) THEN
+        UPDATE phonebook SET phone = p_phone WHERE first_name = p_name;
+    ELSE
+        INSERT INTO phonebook(first_name, phone)
+        VALUES (p_name, p_phone);
+    END IF;
+END;
+$$;
+""")
+
+# fixed pagination
+cur.execute("""
+CREATE OR REPLACE FUNCTION get_contacts_paginated(lim INT, off INT)
+RETURNS TABLE(contact_id INT, first_name VARCHAR, phone VARCHAR)
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    RETURN QUERY
+    SELECT p.id, p.first_name, p.phone
+    FROM phonebook p
+    ORDER BY p.id
+    LIMIT lim OFFSET off;
+END;
+$$;
+""")
+
+cur.execute("""
+CREATE OR REPLACE PROCEDURE delete_contact(identifier VARCHAR)
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    DELETE FROM phonebook
+    WHERE first_name = identifier OR phone = identifier;
+END;
+$$;
+""")
+
+# new procedures
+cur.execute("""
+CREATE OR REPLACE PROCEDURE add_phone(p_contact_name VARCHAR, p_phone VARCHAR, p_type VARCHAR)
+LANGUAGE plpgsql
+AS $$
+DECLARE cid INT;
+BEGIN
+    SELECT id INTO cid FROM phonebook WHERE first_name = p_contact_name;
+    IF cid IS NOT NULL THEN
+        INSERT INTO phones(contact_id, phone, type)
+        VALUES (cid, p_phone, p_type);
+    END IF;
+END;
+$$;
+""")
+
+cur.execute("""
+CREATE OR REPLACE PROCEDURE move_to_group(p_contact_name VARCHAR, p_group_name VARCHAR)
+LANGUAGE plpgsql
+AS $$
+DECLARE gid INT;
+BEGIN
+    SELECT id INTO gid FROM groups WHERE name = p_group_name;
+
+    IF gid IS NULL THEN
+        INSERT INTO groups(name) VALUES (p_group_name)
+        RETURNING id INTO gid;
+    END IF;
+
+    UPDATE phonebook SET group_id = gid
+    WHERE first_name = p_contact_name;
+END;
+$$;
+""")
+
+cur.execute("""
+CREATE OR REPLACE FUNCTION search_contacts(p_query TEXT)
+RETURNS TABLE(name VARCHAR, email VARCHAR, phone VARCHAR)
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    RETURN QUERY
+    SELECT DISTINCT c.first_name, c.email, p.phone
+    FROM phonebook c
+    LEFT JOIN phones p ON c.id = p.contact_id
+    WHERE c.first_name ILIKE '%' || p_query || '%'
+       OR c.email ILIKE '%' || p_query || '%'
+       OR p.phone ILIKE '%' || p_query || '%';
+END;
+$$;
+""")
+
+conn.commit()
+
+# validation
+def is_valid_phone(phone):
+    return re.fullmatch(r"\+7\d{10}", phone) is not None
+
+# add contact
+def insert_from_console():
+    name = input("Name: ")
+    phone = input("Phone: ")
+
+    if not is_valid_phone(phone):
+        print("Invalid phone")
+        return
+
+    cur.execute("CALL upsert_contact(%s, %s)", (name, phone))
+    conn.commit()
+
+# search simple
+def search_pattern():
+    q = input("Search: ")
+    cur.execute("SELECT * FROM get_contacts_by_pattern(%s)", (q,))
+    print(cur.fetchall())
+
+# pagination
+def show_contacts():
+    page = 0
+    limit = 5
+
+    while True:
+        cur.execute("SELECT * FROM get_contacts_paginated(%s,%s)", (limit, page*limit))
+        rows = cur.fetchall()
+
+        if not rows:
+            print("No data")
+            break
+
+        print(f"\nPage {page+1}")
+        for r in rows:
+            print(r)
+
+        action = input("n/p/q: ")
+
+        if action == "n":
+            page += 1
+        elif action == "p" and page > 0:
+            page -= 1
+        elif action == "q":
+            break
+
+# delete
+def delete_entry():
+    val = input("Name or phone: ")
+    cur.execute("CALL delete_contact(%s)", (val,))
+    conn.commit()
+
+# add extra phone
+def add_phone():
+    name = input("Name: ")
+    phone = input("Phone: ")
+    ptype = input("Type (home/work/mobile): ")
+
+    cur.execute("CALL add_phone(%s,%s,%s)", (name, phone, ptype))
+    conn.commit()
+
+# move group
+def move_group():
+    name = input("Name: ")
+    group = input("Group: ")
+
+    cur.execute("CALL move_to_group(%s,%s)", (name, group))
+    conn.commit()
+
+# advanced search
+def advanced_search():
+    q = input("Search: ")
+    cur.execute("SELECT * FROM search_contacts(%s)", (q,))
+    print(cur.fetchall())
+
+# filter by group
+def filter_group():
+    group = input("Group: ")
+
+    cur.execute("""
+    SELECT c.first_name, c.email
+    FROM phonebook c
+    JOIN groups g ON c.group_id = g.id
+    WHERE g.name = %s
+    """, (group,))
+
+    print(cur.fetchall())
+
+# export json
+def export_json():
+    cur.execute("""
+    SELECT c.first_name, c.email, g.name,
+           json_agg(json_build_object('phone', p.phone, 'type', p.type))
+    FROM phonebook c
+    LEFT JOIN phones p ON c.id = p.contact_id
+    LEFT JOIN groups g ON c.group_id = g.id
+    GROUP BY c.id, g.name
+    """)
+
+    data = cur.fetchall()
+
+    with open("contacts.json", "w") as f:
+        json.dump(data, f, default=str)
+
+    print("Exported")
+
+# import json
+def import_json():
+    path = input("Path: ")
+
+    with open(path) as f:
+        data = json.load(f)
+
+    for c in data:
+        name = c[0]
+        email = c[1]
+
+        cur.execute("SELECT 1 FROM phonebook WHERE first_name=%s", (name,))
+        if cur.fetchone():
+            choice = input(f"{name} exists (skip/overwrite): ")
+            if choice == "skip":
+                continue
+            else:
+                cur.execute("DELETE FROM phonebook WHERE first_name=%s", (name,))
+
+        cur.execute("INSERT INTO phonebook(first_name,email) VALUES (%s,%s)", (name, email))
+
+    conn.commit()
+    print("Imported")
+
+# menu
+def main():
+    while True:
+        print("\n1 Add")
+        print("2 Search")
+        print("3 Pages")
+        print("4 Delete")
+        print("5 Add phone")
+        print("6 Move group")
+        print("7 Advanced search")
+        print("8 Filter group")
+        print("9 Export JSON")
+        print("10 Import JSON")
+        print("0 Exit")
+
+        c = input(">> ")
+
+        if c == "1": insert_from_console()
+        elif c == "2": search_pattern()
+        elif c == "3": show_contacts()
+        elif c == "4": delete_entry()
+        elif c == "5": add_phone()
+        elif c == "6": move_group()
+        elif c == "7": advanced_search()
+        elif c == "8": filter_group()
+        elif c == "9": export_json()
+        elif c == "10": import_json()
+        elif c == "0": break
+
+    cur.close()
+    conn.close()
+
+if __name__ == "__main__":
+    main()
